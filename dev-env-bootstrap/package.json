@@ -1,0 +1,25 @@
+{
+  "name": "dev-env-bootstrap",
+  "version": "1.0.0",
+  "description": "跨平台开发环境一键初始化：Node.js (LTS) + Rust (stable) + Tauri CLI，并自动安装 Tauri 的 Windows 前置依赖",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": {
+    "dev-env-bootstrap": "index.js"
+  },
+  "scripts": {
+    "setup": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "tauri",
+    "nodejs",
+    "rust",
+    "setup",
+    "bootstrap"
+  ],
+  "license": "MIT",
+  "private": true
+}
