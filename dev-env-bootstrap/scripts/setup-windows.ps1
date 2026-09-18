@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     dev-env-bootstrap · Windows 环境初始化
 
@@ -13,10 +13,14 @@
 
     说明：winget 在部分网络环境（防火墙/无外网）下不可用，因此优先使用手动下载的
     本地安装包；脚本会读取本地安装包版本并与最新版本对比，差距较大时推荐下载新版。
+
+    C++ Build Tools 特殊处理：vs_BuildTools.exe 只是几 MB 的引导下载器，脚本会先用它
+    在 installers/vs_BuildTools-offline/ 创建离线布局（约 3~4 GB，保留在本地供重复使用），
+    再从布局离线安装；若 installers 子目录中已存在布局则直接使用，全程不访问网络。
 #>
 param(
     # 本地安装包目录（手动下载后放入此处，文件名需匹配各工具的 Pattern）
-    [string]$InstallersDir = (Join-Path $PSScriptRoot '..\installers')
+    [string]$InstallersDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\installers'))
 )
 
 $ErrorActionPreference = 'Continue'
@@ -55,10 +59,12 @@ function Get-FileVersion {
 }
 
 # 在 installers 目录下按文件名模式查找安装包
+# -Recurse 时同时搜索子目录（离线布局文件夹），且子目录中布局内的安装程序优先于顶层散包
 function Find-Installer {
-    param([string]$Pattern)
+    param([string]$Pattern, [switch]$Recurse)
     if (-not (Test-Path $InstallersDir)) { return $null }
-    Get-ChildItem -Path $InstallersDir -Filter $Pattern -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -Path $InstallersDir -Filter $Pattern -File -Recurse:$Recurse -ErrorAction SilentlyContinue |
+        Sort-Object { $_.DirectoryName -eq $InstallersDir } |
         Select-Object -First 1
 }
 
@@ -128,7 +134,8 @@ function Install-Tool {
         [string]$DownloadUrl,
         [string]$WingetId,
         [scriptblock]$GetLatestVersion,
-        [scriptblock]$InstallFromFile
+        [scriptblock]$InstallFromFile,
+        [switch]$Recurse
     )
     Write-Info "----- $Name -----"
 
@@ -139,7 +146,7 @@ function Install-Tool {
     }
 
     # 2) 本地安装包
-    $file = Find-Installer -Pattern $Pattern
+    $file = Find-Installer -Pattern $Pattern -Recurse:$Recurse
     if ($file) {
         $localVer  = Get-FileVersion $file.FullName
         $latestVer = $null
@@ -274,14 +281,38 @@ $tools = @(
         InstalledCheck    = { Test-VsBuildTools }
         VersionText       = { 'C++ Build Tools (MSVC) 已就绪' }
         Pattern           = 'vs_BuildTools*.exe'
+        Recurse           = $true   # 同时识别 installers 子目录中的离线布局
         DownloadUrl       = 'https://aka.ms/vs/17/release/vs_BuildTools.exe'
         WingetId          = 'Microsoft.VisualStudio.2022.BuildTools'
         GetLatestVersion  = $null
         InstallFromFile   = {
             param($file)
-            Write-Info '静默安装 VS Build Tools（含 MSVC + Windows SDK），可能需要数分钟...'
-            $vargs = @('--quiet', '--wait', '--norestart', '--nocache', '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended')
-            $p = Start-Process -FilePath $file.FullName -ArgumentList $vargs -Wait -PassThru -NoNewWindow
+            $workload = @('--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended')
+
+            if ($file.DirectoryName -ne $InstallersDir) {
+                # 找到的是离线布局中的安装程序 -> 直接使用布局内的本地负载，不访问网络
+                Write-Info "使用离线布局安装 VS Build Tools（不访问网络）: $($file.DirectoryName)"
+                $vargs = @('--quiet', '--wait', '--norestart', '--noWeb') + $workload
+                $p = Start-Process -FilePath $file.FullName -ArgumentList $vargs -Wait -PassThru
+                if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_BuildTools 退出码 $($p.ExitCode)" }
+                return
+            }
+
+            # 顶层引导包只有几 MB，真正的安装负载约 3~4 GB 需在线下载。
+            # 先创建离线布局（保留在 installers 目录下供重复使用），再从布局离线安装。
+            $layoutDir = Join-Path $InstallersDir 'vs_BuildTools-offline'
+            Write-Info "引导包需联网下载完整负载（约 3~4 GB，仅首次），将保存为离线布局: $layoutDir"
+            $largs = @('--layout', "`"$layoutDir`"", '--wait', '--lang', 'zh-CN') + $workload
+            $p = Start-Process -FilePath $file.FullName -ArgumentList $largs -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "创建离线布局失败（下载被中断或无外网），退出码 $($p.ExitCode)" }
+
+            $layoutExe = Get-ChildItem -Path $layoutDir -Filter 'vs_BuildTools*.exe' -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if (-not $layoutExe) { throw "离线布局创建失败: $layoutDir 中未找到安装程序" }
+
+            Write-Info '从离线布局静默安装 VS Build Tools（含 MSVC + Windows SDK），可能需要数分钟...'
+            $vargs = @('--quiet', '--wait', '--norestart', '--noWeb') + $workload
+            $p = Start-Process -FilePath $layoutExe.FullName -ArgumentList $vargs -Wait -PassThru
             if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_BuildTools 退出码 $($p.ExitCode)" }
         }
     },
